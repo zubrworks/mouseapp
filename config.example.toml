@@ -1,0 +1,95 @@
+# Example settings profile. Save it as
+#   ~/Library/Application Support/Mouse/profiles/<name>.toml
+# and choose it in the menu bar menu or in Settings > General.
+# All keys are optional; a missing key leaves that setting untouched.
+#
+# The settings in use are in ~/Library/Application Support/Mouse/current.toml
+# (same keys). Choosing a profile copies it there; the app and the driver
+# change only that file.
+#
+# ~/Library/Application Support/Mouse/config.toml keeps only the UI language
+# and the profile the current settings came from:
+#   language = "en"     # en, pl, ... Missing = follow the system language.
+#   profile = "<name>"  # "default" = built-in factory profile (read-only).
+
+# Pointer resolution in DPI (within the range of your mouse, e.g. 200-8000).
+dpi = 1600
+
+[smartshift]
+# Speed threshold for switching to free-spin, 1-255.
+threshold = 83
+
+[wheel]
+# High-resolution scrolling.
+hires = true
+
+[thumbwheel]
+# "scroll" (horizontal scrolling, default), "zoom" (Cmd+= / Cmd+-),
+# "volume" (volume up / down) or "tabs" (Ctrl+Tab / Ctrl+Shift+Tab).
+# Other modes act once per 1/12 of a turn.
+mode = "scroll"
+# Reverse the direction (in every mode).
+invert = false
+# Horizontal scroll speed in percent (100 = default, 1-1000; "scroll" mode only).
+speed = 100
+
+# Mouse wheel scrolling, independent of the trackpad (trackpad events are never
+# changed). Needs the daemon (MouseAgent.app, process `mouse-agent`). Input
+# Monitoring and Accessibility are granted to MouseAgent, not to the settings app.
+[scroll]
+# "natural" or "standard": direction of the mouse wheel only.
+direction = "standard"
+# Wheel speed in percent (100 = default, 10-1000).
+speed = 100
+# Smoothing in percent (0 = off, up to 90).
+smoothing = 0
+
+# Button -> action. Buttons: back, forward, middle, smartshift.
+# Action names are defined by the actions module (e.g. mission_control,
+# app_expose, desktop_left, desktop_right, volume_up, screenshot).
+# "gestures" turns a button into a gesture button with its own set of
+# gestures (see [gestures.middle] below), e.g.  middle = "gestures"
+[buttons]
+back = "back"
+forward = "forward"
+
+# Gesture button (thumb): a click without movement, or a move in one of 4
+# directions. Left and right both set: one action per threshold of movement
+# while the button is held.
+[gestures]
+# Minimal movement (in raw units) that counts as a gesture, 1-10000.
+threshold = 50
+click = "mission_control"
+up = "mission_control"
+down = "app_expose"
+left = "desktop_left"
+right = "desktop_right"
+
+# Every other button set to "gestures" in [buttons] has its own section with
+# the same keys, named after the button: [gestures.middle], [gestures.back],
+# [gestures.forward], [gestures.smartshift]. A missing key does nothing; a
+# missing section means the standard set (click and up = Mission Control,
+# down = App Expose, left / right = previous / next desktop).
+# [gestures.middle]
+# threshold = 50
+# click = "middle_click"
+# up = "volume_up"
+# down = "volume_down"
+# left = "prev_track"
+# right = "next_track"
+
+# Per-application overrides. Only the entries given here replace the global
+# ones; everything else keeps the settings above. Find a bundle id with:
+#   osascript -e 'id of app "Safari"'
+# A button used only inside an app section does nothing in other apps.
+#
+# Safari: back button = previous desktop, gesture up = App Expose.
+# Finder: back button = Mission Control. Other apps use the global settings.
+# [apps."com.apple.Safari".buttons]
+# back = "desktop_left"
+# [apps."com.apple.Safari".gestures]
+# up = "app_expose"
+# [apps."com.apple.Safari".gestures.middle]
+# click = "copy"
+# [apps."com.apple.finder".buttons]
+# back = "mission_control"

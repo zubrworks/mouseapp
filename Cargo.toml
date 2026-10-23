@@ -1,0 +1,42 @@
+[package]
+name = "mouse"
+version = "0.4.2"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+core-graphics = "0.25.0"
+core-foundation = "0.10"
+env_logger = "0.11.11"
+hidapi = "2.6.7"
+log = "0.4.34"
+muda = "0.21.2"
+notify = "8.2.0"
+block2 = "0.6"
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent", "NSGraphicsContext", "objc2-core-graphics", "NSApplication", "NSRunningApplication", "NSWorkspace", "libc", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphics", "NSColorSpace", "NSWindow", "NSView", "NSToolbar", "NSToolbarItem", "NSControl", "NSButton", "NSPopUpButton", "NSSwitch", "NSTextField", "NSMenu", "NSMenuItem", "NSGridView", "NSUserInterfaceItemIdentification", "NSLayoutConstraint", "NSSlider", "NSTableView", "NSTableColumn", "NSScrollView", "NSAlert", "NSTableHeaderView", "NSImageView", "NSOpenPanel", "NSSavePanel", "NSPanel", "NSAccessibilityProtocols", "NSTextAttachment", "NSParagraphStyle", "NSColor", "NSFont", "NSText", "block2"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGEvent"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSGeometry", "NSArray", "NSDictionary", "NSAttributedString", "NSObject", "NSIndexSet", "NSURL", "NSBundle", "NSFileManager", "NSData", "NSRange"] }
+rust-i18n = "4.2.4"
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+toml = "1.1.8"
+toml_edit = "0.22.27"
+tray-icon = "0.26.1"
+
+[features]
+# Test build only (`scripts/bundle.sh --debug`): `mouse debug ...` commands,
+# the app's `app.sock` and the daemon's debug requests, for agents without
+# Input Monitoring, Accessibility or screen recording.
+debug-access = []
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+
+[dev-dependencies]
+# Only for tests: builds real scroll events (same crate and version as above).
+core-graphics = { version = "0.25.0", features = ["highsierra"] }
