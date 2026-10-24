@@ -403,6 +403,7 @@ mod tests {
                 ranges: vec![(200, 8000, 50)],
             }),
             smartshift: None,
+            details: None,
         }
     }
 

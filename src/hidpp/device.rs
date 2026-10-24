@@ -13,7 +13,7 @@ use hidapi::HidApi;
 use rust_i18n::t;
 
 use super::features::{
-    self, battery::{self, Charge}, controls, dpi, fwinfo, host, name, smartshift, thumbwheel, wheel,
+    self, battery, controls, dpi, fwinfo, host, name, smartshift, thumbwheel, wheel,
 };
 use super::message::{HidppError, Message};
 use super::transport::{Interrupter, IoFailed, Transport};
@@ -586,13 +586,7 @@ pub fn write_info(dev: &Device, out: &mut dyn std::io::Write) -> Result<()> {
     writeln!(out, "{line}")?;
     let line = match features::battery::read(dev) {
         Ok(Some(b)) => {
-            let state = match b.charge {
-                Charge::Discharging => t!("info.charge.discharging"),
-                Charge::Charging => t!("info.charge.charging"),
-                Charge::Full => t!("info.charge.full"),
-                Charge::Error => t!("info.charge.error"),
-                Charge::Other => t!("info.charge.other"),
-            };
+            let state = b.charge.label();
             let pct = b.percent.map_or("?".to_string(), |p| format!("{p}%"));
             t!("info.battery", percent = pct, state = state)
         }
@@ -600,12 +594,39 @@ pub fn write_info(dev: &Device, out: &mut dyn std::io::Write) -> Result<()> {
         Err(e) => t!("info.battery_error", error = e),
     };
     writeln!(out, "{line}")?;
+    match features::fwinfo::read(dev) {
+        Ok(Some(d)) => {
+            let none = || t!("info.not_reported").to_string();
+            let ver = |k| d.version(k).map_or_else(none, str::to_string);
+            writeln!(out, "{}", t!("info.firmware", version = ver(features::fwinfo::EntityKind::Firmware)))?;
+            writeln!(out, "{}", t!("info.bootloader", version = ver(features::fwinfo::EntityKind::Bootloader)))?;
+            writeln!(out, "{}", t!("info.hardware", version = ver(features::fwinfo::EntityKind::Hardware)))?;
+            let serial = d.serial.clone().unwrap_or_else(none);
+            writeln!(out, "{}", t!("info.serial", serial = serial))?;
+            let ids = d.model_ids_text().unwrap_or_else(none);
+            writeln!(out, "{}", t!("info.model_id", id = ids))?;
+        }
+        Ok(None) => writeln!(out, "{}", t!("info.details_unsupported"))?,
+        Err(e) => writeln!(out, "{}", t!("info.details_error", error = e))?,
+    }
     let line = match features::host::read(dev) {
         Ok(Some(h)) => t!("info.hosts", count = h.count, current = h.current as u16 + 1),
         Ok(None) => t!("info.hosts_unsupported"),
         Err(e) => t!("info.hosts_error", error = e),
     };
     writeln!(out, "{line}")?;
+    if let Ok(Some(h)) = features::host::read(dev) {
+        match features::host::read_names(dev, h.count) {
+            Ok(names) => {
+                for (i, name) in names.iter().enumerate() {
+                    let name = name.clone().unwrap_or_else(|| t!("info.host_empty").to_string());
+                    let cur = if i == usize::from(h.current) { t!("info.host_current").to_string() } else { String::new() };
+                    writeln!(out, "  {}: {name}{cur}", i + 1)?;
+                }
+            }
+            Err(e) => writeln!(out, "{}", t!("info.host_names_error", error = e))?,
+        }
+    }
     let line = match features::smartshift::read(dev) {
         Ok(Some(s)) => t!("info.smartshift", default = s.default),
         Ok(None) => t!("info.smartshift_unsupported"),

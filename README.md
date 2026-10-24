@@ -13,6 +13,7 @@ useful.
 - Thumb wheel modes, scroll direction, speed and smoothing
 - Profiles with per-app overrides
 - Menu bar app with a settings window, plus a command-line interface
+- Device info: firmware, serial number, battery, Easy-Switch channels with computer names
 - Bluetooth and Logi Bolt receiver
 - English and Polish
 

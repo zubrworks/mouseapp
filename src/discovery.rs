@@ -18,7 +18,7 @@ const USAGE_PAGE_RECEIVER: u16 = 0xFF00;
 const USAGE_PAGE_BLE: u16 = 0xFF43;
 
 /// How a device is connected to the Mac.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Connection {
     Bolt,
     Unifying,

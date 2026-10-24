@@ -13,8 +13,8 @@ use crate::config::Config;
 use crate::devices;
 use crate::events::{self, End, Next};
 use crate::hidpp::device::{Device, Timeout, is_link_failure};
-use crate::hidpp::features::{battery, dpi, smartshift};
-use crate::hub::{Hub, MouseInfo};
+use crate::hidpp::features::{battery, dpi, fwinfo, host, smartshift};
+use crate::hub::{DeviceInfo, Hub, MouseInfo};
 use crate::shutdown;
 
 /// How often the mouse is pinged while connected. Only a backstop: the system
@@ -140,8 +140,31 @@ impl<'a> Reporter<'a> {
         if info.smartshift.is_none() {
             info.smartshift = smartshift::read(dev).ok().flatten();
         }
+        self.read_details(dev, &mut info);
         self.hub.publish(info.clone());
         self.info = info;
+    }
+
+    /// Fills the Device tab data: constant parts once per connection, the
+    /// current Easy-Switch channel on every read. Failed reads keep old values.
+    fn read_details(&self, dev: &Device, info: &mut MouseInfo) {
+        let d = info.details.get_or_insert_with(|| DeviceInfo {
+            connection: dev.connection,
+            firmware: None,
+            hosts: None,
+            host_names: Vec::new(),
+        });
+        if d.firmware.is_none() {
+            d.firmware = fwinfo::read(dev).ok().flatten();
+        }
+        let hosts = host::read(dev).ok().flatten();
+        if let Some(h) = hosts {
+            if d.host_names.is_empty() {
+                let names = host::read_names(dev, h.count).unwrap_or_default();
+                d.host_names = names.into_iter().map(Option::unwrap_or_default).collect();
+            }
+            d.hosts = Some(h);
+        }
     }
 
     fn tick(&mut self, dev: &Device) {

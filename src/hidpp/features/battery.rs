@@ -1,6 +1,7 @@
 //! Battery: UnifiedBattery (0x1004), fallback BatteryStatus (0x1000).
 
 use anyhow::Result;
+use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 
 use crate::hidpp::device::Device;
@@ -24,6 +25,20 @@ pub enum Charge {
     Full,
     Error,
     Other,
+}
+
+impl Charge {
+    /// Localized state text.
+    pub fn label(self) -> String {
+        match self {
+            Charge::Discharging => t!("info.charge.discharging"),
+            Charge::Charging => t!("info.charge.charging"),
+            Charge::Full => t!("info.charge.full"),
+            Charge::Error => t!("info.charge.error"),
+            Charge::Other => t!("info.charge.other"),
+        }
+        .to_string()
+    }
 }
 
 /// Battery reading. `percent` is `None` when the device does not report a

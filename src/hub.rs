@@ -7,9 +7,29 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::hidpp::features::battery::Battery;
+use crate::discovery::Connection;
 use crate::hidpp::features::dpi::DpiList;
+use crate::hidpp::features::fwinfo::DeviceDetails;
+use crate::hidpp::features::host::Hosts;
 use crate::hidpp::features::smartshift::SmartShift;
 use crate::util::lock;
+
+/// Static data for the settings window's Device tab. Everything but
+/// `hosts.current` is read once per connection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub connection: Connection,
+    /// Firmware, serial and model IDs (DeviceFWVersion).
+    #[serde(default)]
+    pub firmware: Option<DeviceDetails>,
+    /// Easy-Switch channel count and the current channel (refreshed on every read).
+    #[serde(default)]
+    pub hosts: Option<Hosts>,
+    /// Friendly name per channel (index = channel - 1); empty text for an empty
+    /// channel (the TOML status cannot hold `None` in a list).
+    #[serde(default)]
+    pub host_names: Vec<String>,
+}
 
 /// What the daemon knows about one connected mouse.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +44,9 @@ pub struct MouseInfo {
     pub dpi_list: Option<DpiList>,
     /// SmartShift state read when the mouse connected.
     pub smartshift: Option<SmartShift>,
+    /// Data for the Device tab; absent in replies of older agents.
+    #[serde(default)]
+    pub details: Option<DeviceInfo>,
 }
 
 /// Request to the daemon loop.

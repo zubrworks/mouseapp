@@ -3,6 +3,7 @@
 //! re-applies them.
 
 pub mod apps;
+pub mod device;
 pub mod buttons;
 pub mod general;
 pub mod gestures;
@@ -56,16 +57,18 @@ pub enum Tab {
     Gestures,
     Scrolling,
     Apps,
+    Device,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 6] = [
+    pub const ALL: [Tab; 7] = [
         Tab::General,
         Tab::Pointer,
         Tab::Buttons,
         Tab::Gestures,
         Tab::Scrolling,
         Tab::Apps,
+        Tab::Device,
     ];
 
     /// Toolbar item identifier, also the prefix of control ids in the tab.
@@ -77,6 +80,7 @@ impl Tab {
             Tab::Gestures => "gestures",
             Tab::Scrolling => "scrolling",
             Tab::Apps => "apps",
+            Tab::Device => "device",
         }
     }
 
@@ -92,6 +96,7 @@ impl Tab {
             Tab::Gestures => t!("settings.tab.gestures"),
             Tab::Scrolling => t!("settings.tab.scrolling"),
             Tab::Apps => t!("settings.tab.apps"),
+            Tab::Device => t!("settings.tab.device"),
         }
         .to_string()
     }
@@ -105,6 +110,7 @@ impl Tab {
             Tab::Gestures => "hand.draw",
             Tab::Scrolling => "arrow.up.and.down",
             Tab::Apps => "square.grid.2x2",
+            Tab::Device => "info.circle",
         }
     }
 
@@ -118,6 +124,7 @@ impl Tab {
             Tab::Gestures => gestures::build(ctx, target, mtm),
             Tab::Scrolling => scrolling::build(ctx, target, mtm),
             Tab::Apps => apps::build(ctx, target, mtm),
+            Tab::Device => device::build(ctx, target, mtm),
         }
     }
 
@@ -136,6 +143,7 @@ impl Tab {
             Tab::Gestures => gestures::changed(id, sender, ctx, mtm),
             Tab::Scrolling => scrolling::changed(id, sender, ctx, mtm),
             Tab::Apps => apps::changed(id, sender, ctx, mtm),
+            Tab::Device => Vec::new(),
         }
     }
 }

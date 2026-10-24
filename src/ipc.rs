@@ -303,7 +303,11 @@ fn answer(stream: &UnixStream, handler: &dyn Fn(Request) -> Reply) -> Result<()>
 mod tests {
     use super::*;
     use crate::hidpp::features::battery::{Battery, Charge};
+    use crate::discovery::Connection;
     use crate::hidpp::features::dpi::DpiList;
+    use crate::hidpp::features::fwinfo::DeviceDetails;
+    use crate::hidpp::features::host::Hosts;
+    use crate::hub::DeviceInfo;
     use crate::hidpp::features::smartshift::SmartShift;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -328,6 +332,16 @@ mod tests {
                         ratchet: true,
                         threshold: 10,
                         default: 10,
+                    }),
+                    details: Some(DeviceInfo {
+                        connection: Connection::Bluetooth,
+                        firmware: Some(DeviceDetails {
+                            serial: Some("SN0000000000".into()),
+                            model_ids: vec![0xB034],
+                            ..DeviceDetails::default()
+                        }),
+                        hosts: Some(Hosts { count: 3, current: 0 }),
+                        host_names: vec!["MacBook".into(), String::new(), String::new()],
                     }),
                 },
                 MouseInfo {
@@ -378,6 +392,7 @@ mod tests {
         let old = "status\nmissing = []\nprofile = \"Default\"\n\n[[mice]]\nkey = \"unit:aa\"\nname = \"MX\"\n";
         let Reply::Status(s) = Reply::decode(old).unwrap() else { panic!("not a status") };
         assert_eq!(s.agent, None);
+        assert_eq!(s.mice[0].details, None);
         assert_eq!(s.profile, "Default");
         assert_eq!(s.mice.len(), 1);
         // A new reply carries it (build is optional).

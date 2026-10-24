@@ -170,6 +170,13 @@ impl SettingsWindow {
     pub fn set_driver(&mut self, state: &State) {
         let ctx = &self.target.ivars().ctx;
         if !card_changed(&ctx.driver.borrow(), state) {
+            // Keep the data fresh for tabs shown later; only the Device tab
+            // redraws for it, and only when its own data changed.
+            let device = self.tab == Tab::Device && super::device::changed(&ctx.driver.borrow(), state);
+            ctx.driver.replace(state.clone());
+            if device {
+                self.refresh();
+            }
             return;
         }
         let status = state.status();
