@@ -1,9 +1,11 @@
 //! Scroll handling: system scroll events synthesized from the diverted thumb
 //! wheel, and an event tap that sets mouse wheel direction, speed and
-//! smoothing independently of the trackpad.
+//! smoothing independently of the trackpad, or makes the wheel scroll like
+//! a trackpad (trackpad mode).
 
 mod synth;
 mod tap;
+mod trackpad;
 mod transform;
 
 use std::sync::{Condvar, Mutex, PoisonError};

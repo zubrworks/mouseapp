@@ -9,13 +9,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 use rust_i18n::t;
 
+use crate::actions::dock_swipe::{self, Phase};
 use crate::actions::keyboard;
 use crate::actions::{self, Action};
 use crate::bindings::{BindingSet, GestureBinding, binding_set};
 use crate::checks::{self, Checker, Checks};
 use crate::config::{Config, DEFAULT_THRESHOLD};
 use crate::devices::{self, Model};
-use crate::gestures::Tracker;
+use crate::gestures::{Gesture, Swipe, SwipeEnd, Tracker};
 use crate::hidpp::connection::{self, Link};
 use crate::hidpp::device::{Device, LinkStats, is_link_failure};
 use crate::hidpp::features::controls::{self, Event};
@@ -135,6 +136,89 @@ impl Switcher {
 impl Drop for Switcher {
     fn drop(&mut self) {
         self.release();
+    }
+}
+
+/// The sign of a trackpad swipe for a gesture button whose left and right
+/// switch desktops: +1 if moving right goes to the desktop on the right, -1
+/// if the two are swapped; `None` for any other pair.
+fn swipe_sign(left: &Action, right: &Action) -> Option<i32> {
+    match (spaces::direction(left), spaces::direction(right)) {
+        (Some(spaces::Dir::Left), Some(spaces::Dir::Right)) => Some(1),
+        (Some(spaces::Dir::Right), Some(spaces::Dir::Left)) => Some(-1),
+        _ => None,
+    }
+}
+
+/// The Dock swipe of the gesture button (`gestures.trackpad_swipe`). A
+/// swipe still open when this is dropped (session end, error, panic) is
+/// cancelled, so the Dock is never left halfway between desktops.
+struct Swiper {
+    open: Option<Swipe>,
+    /// Sends one swipe event (replaced in tests).
+    post: fn(Phase, f64, f64),
+    /// True if swipes can be sent now (replaced in tests).
+    available: fn() -> bool,
+}
+
+impl Default for Swiper {
+    fn default() -> Self {
+        Swiper { open: None, post: dock_swipe::post, available: dock_swipe::available }
+    }
+}
+
+impl Swiper {
+    fn is_open(&self) -> bool {
+        self.open.is_some()
+    }
+
+    /// Starts a swipe (a running one is cancelled first).
+    fn begin(&mut self, threshold: u16, at: Instant) {
+        self.cancel();
+        let swipe = Swipe::new(threshold, at);
+        (self.post)(Phase::Began, swipe.progress(), 0.0);
+        self.open = Some(swipe);
+    }
+
+    /// Moves the open swipe by `dx` raw units (positive = to the right).
+    fn add(&mut self, at: Instant, dx: i32) {
+        if let Some(swipe) = self.open.as_mut() {
+            let progress = swipe.add(at, dx);
+            (self.post)(Phase::Changed, progress, 0.0);
+        }
+    }
+
+    /// Ends the open swipe released at `at`: the desktop moves on or comes
+    /// back. `None` if no swipe was open.
+    fn finish(&mut self, at: Instant) -> Option<SwipeEnd> {
+        let swipe = self.open.take()?;
+        let end = swipe.end(at);
+        match end {
+            SwipeEnd::Commit { progress, speed } => (self.post)(Phase::Ended, progress, speed),
+            SwipeEnd::Cancel { progress } => (self.post)(Phase::Cancelled, progress, 0.0),
+        }
+        log::info!(
+            "dock swipe end: {end:?} speed_now={:.2} sure={}",
+            swipe.speed(at),
+            end.sure()
+        );
+        Some(end)
+    }
+
+    /// Cancels the open swipe: the desktop comes back. True if one was open.
+    fn cancel(&mut self) -> bool {
+        let Some(swipe) = self.open.take() else {
+            return false;
+        };
+        (self.post)(Phase::Cancelled, swipe.progress(), 0.0);
+        log::info!("dock swipe cancelled: progress={:.3}", swipe.progress());
+        true
+    }
+}
+
+impl Drop for Swiper {
+    fn drop(&mut self) {
+        self.cancel();
     }
 }
 
@@ -287,6 +371,11 @@ const EVENT_WARN_EVERY: Duration = Duration::from_secs(10);
 /// at the app switcher, and no longer than the series of checks it blocks.
 const HELD_MAX: Duration = Duration::from_secs(60);
 
+/// An open trackpad swipe without any button or movement notification for
+/// this long is cancelled: the release was most likely lost, and the Dock
+/// would stay halfway between desktops until [`HELD_MAX`].
+const SWIPE_IDLE_MAX: Duration = Duration::from_secs(10);
+
 /// Movement reported this soon after the gesture button was pressed is
 /// ignored: the first report after a press carries the rest of the movement
 /// from before it (2-33 ms after the press, often in the direction of the
@@ -305,6 +394,12 @@ struct GestureState<'a> {
     pair: Option<(Action, Action)>,
     hold_cmd: bool,
     switcher: Switcher,
+    /// `gestures.trackpad_swipe` is on.
+    trackpad: bool,
+    /// The current press swipes between desktops like a trackpad: the sign
+    /// from [`swipe_sign`].
+    swipe_sign: Option<i32>,
+    swiper: Swiper,
     held: Vec<u16>,
     /// When the current gesture started and how many movement reports it had.
     started: Instant,
@@ -319,7 +414,8 @@ struct GestureState<'a> {
 }
 
 impl<'a> GestureState<'a> {
-    fn new(gesture_cids: Vec<u16>) -> Self {
+    /// `trackpad`: `gestures.trackpad_swipe` is on.
+    fn new(gesture_cids: Vec<u16>, trackpad: bool) -> Self {
         GestureState {
             gesture_cids,
             tracker: Tracker::new(DEFAULT_THRESHOLD),
@@ -327,6 +423,9 @@ impl<'a> GestureState<'a> {
             pair: None,
             hold_cmd: false,
             switcher: Switcher::default(),
+            trackpad,
+            swipe_sign: None,
+            swiper: Swiper::default(),
             held: Vec::new(),
             started: Instant::now(),
             moves: 0,
@@ -337,19 +436,28 @@ impl<'a> GestureState<'a> {
         }
     }
 
+    /// The mouse link is lost: an open trackpad swipe is cancelled (the
+    /// release may never come). Other gestures wait for their release.
+    fn link_lost(&mut self, at: Instant) {
+        if self.swiper.is_open() {
+            self.drop_gesture(at);
+        }
+    }
+
     /// True while a button is held or a gesture is open.
     fn busy(&self) -> bool {
         !self.held.is_empty() || self.active.is_some()
     }
 
     /// Ends the open gesture without running its action: the release of its
-    /// button is lost or presumed lost. Cmd of the app switcher is released.
-    /// Returns true if a gesture was open.
+    /// button is lost or presumed lost. Cmd of the app switcher is released,
+    /// a trackpad swipe cancelled. Returns true if a gesture was open.
     fn drop_gesture(&mut self, at: Instant) -> bool {
         let Some((cid, _)) = self.active.take() else {
             return false;
         };
         self.switcher.release();
+        self.swiper.cancel();
         let _ = self.tracker.release();
         let (x, y) = self.tracker.sums();
         log::info!(
@@ -369,7 +477,16 @@ impl<'a> GestureState<'a> {
     /// single notification: its release was most likely lost, and the held
     /// state would block the periodic checks (and keep Cmd down) for good.
     fn expire(&mut self, at: Instant) {
-        if !self.busy() || at.saturating_duration_since(self.last_event) < HELD_MAX {
+        let quiet = at.saturating_duration_since(self.last_event);
+        if self.swiper.is_open() && quiet >= SWIPE_IDLE_MAX {
+            log::warn!(
+                "trackpad swipe without events: held={} for_s={}; cancelling it, the release was probably lost",
+                cid_list(&self.held),
+                quiet.as_secs()
+            );
+            self.drop_gesture(at);
+        }
+        if !self.busy() || quiet < HELD_MAX {
             return;
         }
         let dropped = self.drop_gesture(at);
@@ -427,16 +544,24 @@ impl<'a> GestureState<'a> {
                     .pair
                     .as_ref()
                     .is_some_and(|(l, r)| is_switcher(Some(l)) && is_switcher(Some(r)));
+                self.swipe_sign = self
+                    .pair
+                    .as_ref()
+                    .filter(|_| self.trackpad)
+                    .and_then(|(l, r)| swipe_sign(l, r))
+                    .filter(|_| (self.swiper.available)());
                 self.tracker = Tracker::new(cur.threshold);
                 self.tracker.set_continuous(self.pair.is_some());
                 self.tracker.press();
                 self.started = at;
                 self.moves = 0;
                 self.skipped = (0, 0, 0);
-                log::info!(
-                    "gesture start: button=0x{cid:04X} mode={}",
-                    if self.pair.is_some() { "repeat" } else { "single" }
-                );
+                let mode = match (&self.pair, self.swipe_sign) {
+                    (_, Some(_)) => "swipe",
+                    (Some(_), None) => "repeat",
+                    (None, None) => "single",
+                };
+                log::info!("gesture start: button=0x{cid:04X} mode={mode}");
             } else if let Some(a) = bound.buttons.get(&cid) {
                 run(a);
             }
@@ -447,11 +572,14 @@ impl<'a> GestureState<'a> {
             self.active = None;
             self.switcher.release();
             let gesture = self.tracker.release();
+            let swipe = self.swiper.finish(at);
             let (x, y) = self.tracker.sums();
-            let result = match gesture {
-                Some(g) => g.key(),
-                None if self.tracker.ambiguous() => "ambiguous",
-                None => "none",
+            let result = match (gesture, swipe) {
+                (Some(g), _) => g.key(),
+                (None, Some(SwipeEnd::Commit { .. })) => "swipe",
+                (None, Some(SwipeEnd::Cancel { .. })) => "swipe_back",
+                (None, None) if self.tracker.ambiguous() => "ambiguous",
+                (None, None) => "none",
             };
             log::info!(
                 "gesture end: button=0x{cid:04X} result={result} moves={} x={x} y={y} skipped={} skip_x={} skip_y={} took_ms={}",
@@ -463,10 +591,21 @@ impl<'a> GestureState<'a> {
             );
             #[cfg(feature = "debug-access")]
             self.note_end(cid, result, at);
+            if let Some(end @ SwipeEnd::Commit { progress, .. }) = swipe
+                && end.sure()
+            {
+                // Watched like a key step (stuck desktop, see `spaces`).
+                spaces::note_step(if progress > 0.0 { spaces::Dir::Right } else { spaces::Dir::Left });
+            }
             if let Some(g) = gesture
                 && let Some(a) = cur.actions.get(g.key())
             {
-                run(a);
+                // Trackpad mode: Mission Control and App Exposé through the
+                // Dock, without keys.
+                let dock = (self.trackpad && matches!(g, Gesture::Up | Gesture::Down))
+                    .then(|| actions::through_dock(a))
+                    .flatten();
+                run(dock.as_ref().unwrap_or(a));
             }
         }
         self.held = now;
@@ -536,6 +675,18 @@ impl<'a> GestureState<'a> {
         }
         self.moves += 1;
         let steps = self.tracker.motion(dx, dy);
+        if let Some(sign) = self.swipe_sign {
+            // Horizontal: the desktop follows; the first report over the
+            // threshold starts the swipe. Vertical gestures end on release.
+            if self.tracker.stepping() {
+                if self.swiper.is_open() {
+                    self.swiper.add(at, i32::from(dx) * sign);
+                } else if let Some((_, cur)) = self.active {
+                    self.swiper.begin(cur.threshold, at);
+                }
+            }
+            return;
+        }
         if let Some((l, r)) = &self.pair {
             self.switcher.step(steps, l, r, self.hold_cmd, run);
         }
@@ -636,7 +787,8 @@ fn divert_and_pump(
             .name("mouse-checks".into())
             .spawn_scoped(s, move || checker.run(dev, link))?;
         let mouse = Mouse { dev, idx, set, wireless_idx, link };
-        let result = mouse.pump(GestureState::new(gesture_cids), &mut thumb, tick);
+        let trackpad = cfg.gestures.trackpad_swipe == Some(true);
+        let result = mouse.pump(GestureState::new(gesture_cids, trackpad), &mut thumb, tick);
         // A request the check thread waits for is answered quickly (or
         // times out); the buttons are restored after it.
         link.quit();
@@ -733,6 +885,7 @@ impl<'a> Mouse<'a> {
                 }
                 Some(Link::Lost) => {
                     log::info!("mouse link lost (receiver notification)");
+                    state.link_lost(Instant::now());
                     continue;
                 }
                 None => {}
@@ -877,6 +1030,23 @@ mod tests {
         CMD_CALLS.with(|c| c.borrow().clone())
     }
 
+    thread_local! {
+        /// Swipe events sent in this test: (phase, progress, speed).
+        static SWIPES: std::cell::RefCell<Vec<(Phase, f64, f64)>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn fake_post(phase: Phase, progress: f64, speed: f64) {
+        SWIPES.with(|c| c.borrow_mut().push((phase, progress, speed)));
+    }
+
+    fn swipes() -> Vec<(Phase, f64, f64)> {
+        SWIPES.with(|c| c.borrow().clone())
+    }
+
+    fn phases() -> Vec<Phase> {
+        swipes().into_iter().map(|(p, _, _)| p).collect()
+    }
+
     fn set_for(text: &str) -> BindingSet {
         let cfg = Config::parse(text, std::path::Path::new("t.toml")).unwrap();
         binding_set(&devices::mx_master_3s::MODEL, &cfg).unwrap()
@@ -891,8 +1061,10 @@ mod tests {
         "[gestures]\nthreshold = 50\nclick = \"shortcut:cmd+a\"\ndown = \"shortcut:cmd+b\"\n";
 
     fn new_state() -> GestureState<'static> {
-        let mut s = GestureState::new(vec![THUMB]);
+        let mut s = GestureState::new(vec![THUMB], false);
         s.switcher.cmd_key = fake_cmd_key;
+        s.swiper.post = fake_post;
+        s.swiper.available = || true;
         s
     }
 
@@ -1255,7 +1427,7 @@ mod tests {
                 outcome
             });
             let mouse = Mouse { dev: &dev, idx: CONTROLS_IDX, set: &set, wireless_idx: None, link: &link };
-            let result = mouse.pump(GestureState::new(vec![MIDDLE]), &mut None, &mut tick);
+            let result = mouse.pump(GestureState::new(vec![MIDDLE], false), &mut None, &mut tick);
             link.quit();
             check_thread.join().unwrap();
             if let Err(panic) = script.join().unwrap() {
@@ -1369,7 +1541,7 @@ mod tests {
                 outcome
             });
             let mouse = Mouse { dev: &dev, idx: CONTROLS_IDX, set: &set, wireless_idx: None, link: &link };
-            let result = mouse.pump(GestureState::new(vec![MIDDLE]), &mut None, &mut tick);
+            let result = mouse.pump(GestureState::new(vec![MIDDLE], false), &mut None, &mut tick);
             link.quit();
             check_thread.join().unwrap();
             if let Err(panic) = script.join().unwrap() {
@@ -1379,5 +1551,182 @@ mod tests {
         });
         assert!(matches!(result, Ok(End::Stop)));
         assert!(link.take_end().is_none());
+    }
+
+    /// The standard gestures (threshold 50: 100 units per desktop).
+    const DESKTOPS: &str = "[gestures]\ntrackpad_swipe = true\nthreshold = 50\nclick = \"mission_control\"\nup = \"mission_control\"\ndown = \"app_expose\"\nleft = \"desktop_left\"\nright = \"desktop_right\"\n";
+
+    fn trackpad_state() -> GestureState<'static> {
+        let mut s = new_state();
+        s.trackpad = true;
+        s
+    }
+
+    /// Moves `dx` `n` times, 10 ms apart.
+    fn moves(rig: &mut Rig, s: &mut GestureState, dx: i16, n: usize) {
+        for _ in 0..n {
+            rig.at += Duration::from_millis(10);
+            rig.motion(s, dx);
+        }
+    }
+
+    #[test]
+    fn a_swipe_follows_the_movement_and_finishes_past_half() {
+        let set = set_for(DESKTOPS);
+        let (mut s, mut rig) = (trackpad_state(), Rig::new());
+        rig.buttons(&mut s, &set, &[THUMB]);
+        moves(&mut rig, &mut s, 30, 1);
+        assert!(swipes().is_empty(), "below the threshold");
+        moves(&mut rig, &mut s, 30, 1);
+        assert_eq!(phases(), [Phase::Began], "starts at the threshold");
+        moves(&mut rig, &mut s, 20, 3);
+        let p: Vec<f64> = swipes().iter().map(|e| e.1).collect();
+        assert_eq!(p.len(), 4);
+        assert!((p[3] - 0.6).abs() < 1e-9, "{p:?}");
+        rig.buttons(&mut s, &set, &[]);
+        let (phase, progress, speed) = swipes()[4];
+        assert_eq!(phase, Phase::Ended);
+        assert!((progress - 0.6).abs() < 1e-9 && speed > 0.0);
+        assert!(rig.actions.is_empty(), "no keys: {:?}", rig.actions);
+        assert!(!s.busy() && !s.swiper.is_open());
+    }
+
+    #[test]
+    fn a_short_slow_swipe_goes_back() {
+        let set = set_for(DESKTOPS);
+        let (mut s, mut rig) = (trackpad_state(), Rig::new());
+        rig.buttons(&mut s, &set, &[THUMB]);
+        moves(&mut rig, &mut s, -60, 1);
+        moves(&mut rig, &mut s, -1, 20);
+        rig.at += Duration::from_millis(300);
+        rig.buttons(&mut s, &set, &[]);
+        let (phase, progress, _) = *swipes().last().unwrap();
+        assert_eq!(phase, Phase::Cancelled);
+        assert!((progress + 0.2).abs() < 1e-9, "{progress}");
+        assert!(rig.actions.is_empty());
+    }
+
+    #[test]
+    fn swapped_desktops_swipe_the_other_way() {
+        let text = DESKTOPS.replace("\"desktop_left\"", "\"x\"").replace("\"desktop_right\"", "\"desktop_left\"").replace("\"x\"", "\"desktop_right\"");
+        let set = set_for(&text);
+        let (mut s, mut rig) = (trackpad_state(), Rig::new());
+        rig.buttons(&mut s, &set, &[THUMB]);
+        moves(&mut rig, &mut s, 60, 1);
+        moves(&mut rig, &mut s, 30, 1);
+        assert!(swipes()[1].1 < 0.0, "{:?}", swipes());
+    }
+
+    #[test]
+    fn up_and_down_go_through_the_dock_only_in_trackpad_mode() {
+        use crate::actions::Expose;
+        for (trackpad, want) in [
+            (true, [Action::Expose(Expose::MissionControl), Action::Expose(Expose::App)]),
+            (false, [actions::parse("mission_control").unwrap(), actions::parse("app_expose").unwrap()]),
+        ] {
+            let set = set_for(DESKTOPS);
+            let (mut s, mut rig) = (new_state(), Rig::new());
+            s.trackpad = trackpad;
+            for (dy, want) in [(-40, &want[0]), (40, &want[1])] {
+                rig.buttons(&mut s, &set, &[THUMB]);
+                for _ in 0..6 {
+                    rig.motion_xy(&mut s, 0, dy);
+                }
+                rig.buttons(&mut s, &set, &[]);
+                assert_eq!(rig.actions.pop(), Some(format!("{want:?}")), "trackpad={trackpad}");
+            }
+            // The click keeps its action as set.
+            rig.buttons(&mut s, &set, &[THUMB]);
+            rig.buttons(&mut s, &set, &[]);
+            assert_eq!(rig.actions.pop(), Some(format!("{:?}", actions::parse("mission_control").unwrap())));
+            assert!(swipes().is_empty());
+        }
+    }
+
+    #[test]
+    fn without_the_option_or_the_dock_the_keys_step_as_before() {
+        let step = format!("{:?}", actions::parse("desktop_right").unwrap());
+        for (trackpad, available) in [(false, true), (true, false)] {
+            let set = set_for(DESKTOPS);
+            let (mut s, mut rig) = (new_state(), Rig::new());
+            s.trackpad = trackpad;
+            if !available {
+                s.swiper.available = || false;
+            }
+            rig.buttons(&mut s, &set, &[THUMB]);
+            moves(&mut rig, &mut s, 60, 1);
+            moves(&mut rig, &mut s, 50, 1);
+            rig.buttons(&mut s, &set, &[]);
+            assert_eq!(rig.actions, [step.clone(), step.clone()]);
+            assert!(swipes().is_empty());
+        }
+        // Left and right set to something else: no swipe either.
+        let set = set_for("[gestures]\ntrackpad_swipe = true\nleft = \"back\"\nright = \"forward\"\n");
+        let (mut s, mut rig) = (trackpad_state(), Rig::new());
+        rig.buttons(&mut s, &set, &[THUMB]);
+        moves(&mut rig, &mut s, 60, 1);
+        rig.buttons(&mut s, &set, &[]);
+        assert_eq!(rig.actions.len(), 1);
+        assert!(swipes().is_empty());
+    }
+
+    /// An open swipe that is 0.3 desktop on.
+    fn open_swipe<'a>(s: &mut GestureState<'a>, rig: &mut Rig, set: &'a BindingSet) {
+        rig.buttons(s, set, &[THUMB]);
+        moves(rig, s, 60, 1);
+        moves(rig, s, 10, 3);
+        assert!(s.swiper.is_open());
+    }
+
+    fn assert_cancelled_once() {
+        let ends: Vec<_> = swipes().into_iter().filter(|e| e.0 != Phase::Changed).collect();
+        assert_eq!(ends.len(), 2, "{ends:?}");
+        assert_eq!((ends[0].0, ends[1].0), (Phase::Began, Phase::Cancelled));
+        assert!((ends[1].1 - 0.3).abs() < 1e-9, "{ends:?}");
+    }
+
+    #[test]
+    fn a_lost_release_cancels_the_swipe() {
+        let set = set_for(DESKTOPS);
+        let (mut s, mut rig) = (trackpad_state(), Rig::new());
+        open_swipe(&mut s, &mut rig, &set);
+        rig.buttons(&mut s, &set, &[THUMB]); // the same list again
+        assert_cancelled_once();
+        assert!(rig.actions.is_empty());
+    }
+
+    #[test]
+    fn a_swipe_without_events_is_cancelled_after_a_while() {
+        let set = set_for(DESKTOPS);
+        let (mut s, mut rig) = (trackpad_state(), Rig::new());
+        open_swipe(&mut s, &mut rig, &set);
+        s.expire(rig.at + SWIPE_IDLE_MAX - Duration::from_millis(1));
+        assert!(s.swiper.is_open(), "holding still is fine for a while");
+        s.expire(rig.at + SWIPE_IDLE_MAX);
+        assert_cancelled_once();
+        // The real release later does nothing more.
+        rig.buttons(&mut s, &set, &[]);
+        assert_cancelled_once();
+        assert!(rig.actions.is_empty() && !s.busy());
+    }
+
+    #[test]
+    fn a_lost_link_or_the_end_of_the_session_cancels_the_swipe() {
+        let set = set_for(DESKTOPS);
+        let (mut s, mut rig) = (trackpad_state(), Rig::new());
+        open_swipe(&mut s, &mut rig, &set);
+        s.link_lost(rig.at);
+        assert_cancelled_once();
+        SWIPES.with(|c| c.borrow_mut().clear());
+        let (mut s, mut rig) = (trackpad_state(), Rig::new());
+        open_swipe(&mut s, &mut rig, &set);
+        drop(s);
+        assert_cancelled_once();
+        // Nothing open: nothing sent.
+        SWIPES.with(|c| c.borrow_mut().clear());
+        let mut s = trackpad_state();
+        s.link_lost(Instant::now());
+        drop(s);
+        assert!(swipes().is_empty());
     }
 }

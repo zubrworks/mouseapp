@@ -1,6 +1,7 @@
 //! Gestures tab: actions and threshold of a gesture button. The thumb
 //! gesture button and every button set to the `gestures` action have their
-//! own set; a popup chooses which one is edited.
+//! own set; a popup chooses which one is edited. The trackpad swipe switch
+//! is global (all gesture buttons).
 
 use std::cell::RefCell;
 
@@ -11,8 +12,9 @@ use objc2_app_kit::NSView;
 use rust_i18n::t;
 
 use super::{
-    ActionChoice, Context, Effect, action_choice, action_popup, as_view, form, hint_label, popup,
-    popup_index, read_config, remappable_buttons, slider, slider_value, tr_ns, update_config,
+    ActionChoice, Context, Effect, action_choice, action_popup, as_view, form, hint_label, is_on,
+    popup, popup_index, read_config, remappable_buttons, slider, slider_value, switch, tr_ns,
+    update_config,
 };
 use crate::config::{
     Config, DEFAULT_THRESHOLD, GESTURE_THRESHOLD_RANGE, GestureSet, THUMB_GESTURE_BUTTON, slider_bounds,
@@ -21,6 +23,7 @@ use crate::config::{
 const PREFIX: &str = "gestures.";
 const ID_THRESHOLD: &str = "gestures.threshold";
 const ID_BUTTON: &str = "gestures.button";
+const ID_TRACKPAD: &str = "gestures.trackpad_swipe";
 
 /// State of the Gestures tab, kept in the window [`Context`].
 pub struct GesturesState {
@@ -79,6 +82,13 @@ pub fn build(ctx: &Context, target: &AnyObject, mtm: MainThreadMarker) -> Retain
         t!("settings.gestures.threshold").to_string(),
         slider(slider_bounds(&GESTURE_THRESHOLD_RANGE), f64::from(threshold), &threshold.to_string(), ID_THRESHOLD, target, mtm),
     ));
+    let trackpad = cfg.gestures.trackpad_swipe.unwrap_or(false);
+    rows.push((
+        t!("settings.gestures.trackpad_swipe").to_string(),
+        as_view(&switch(trackpad, ID_TRACKPAD, target, mtm)),
+    ));
+    let trackpad_hint = hint_label(&tr_ns("settings.gestures.trackpad_swipe_hint"), mtm);
+    rows.push((String::new(), as_view(&trackpad_hint)));
     form(rows, mtm)
 }
 
@@ -92,6 +102,13 @@ pub fn changed(id: &str, sender: &AnyObject, ctx: &Context, mtm: MainThreadMarke
                 *ctx.gestures.selected.borrow_mut() = k.to_string();
             }
             Vec::new()
+        }
+        ID_TRACKPAD => {
+            let Some(on) = is_on(sender) else {
+                return Vec::new();
+            };
+            log::info!("settings: {id} = {on}");
+            update_config(ctx, mtm, |c| c.gestures.trackpad_swipe = Some(on))
         }
         ID_THRESHOLD => {
             let Some(v) = slider_value(sender, 1.0) else {

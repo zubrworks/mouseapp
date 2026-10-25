@@ -3,7 +3,7 @@
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_app_kit::NSView;
+use objc2_app_kit::{NSControl, NSView};
 use rust_i18n::t;
 
 use super::{
@@ -15,6 +15,7 @@ use crate::config::{
 };
 use crate::hidpp::features::{thumbwheel, wheel};
 
+const ID_STYLE: &str = "scrolling.style";
 const ID_DIRECTION: &str = "scrolling.direction";
 const ID_SPEED: &str = "scrolling.speed";
 const ID_SMOOTHING: &str = "scrolling.smoothing";
@@ -34,6 +35,26 @@ fn percent(v: impl std::fmt::Display) -> String {
     t!("settings.percent", value = v.to_string()).to_string()
 }
 
+/// Wheel scrolling styles in popup order: standard, like a trackpad.
+const STYLES: [bool; 2] = [false, true];
+
+/// Popup titles of [`STYLES`].
+fn style_titles() -> Vec<String> {
+    vec![
+        t!("settings.scrolling.style_standard").to_string(),
+        t!("settings.scrolling.style_trackpad").to_string(),
+    ]
+}
+
+/// Enables or greys out the controls inside `view` (a slider row).
+fn set_enabled(view: &NSView, on: bool) {
+    for v in view.subviews() {
+        if let Some(c) = v.downcast_ref::<NSControl>() {
+            c.setEnabled(on);
+        }
+    }
+}
+
 pub fn build(ctx: &Context, target: &AnyObject, mtm: MainThreadMarker) -> Retained<NSView> {
     let cfg = read_config(ctx);
     // Not set yet: show what the system does now.
@@ -44,9 +65,25 @@ pub fn build(ctx: &Context, target: &AnyObject, mtm: MainThreadMarker) -> Retain
     let direction = switch(natural, ID_DIRECTION, target, mtm);
     let speed = cfg.scroll.speed.unwrap_or(DEFAULT_SPEED);
     let smoothing = cfg.scroll.smoothing.unwrap_or(0);
+    let trackpad = cfg.scroll.trackpad.unwrap_or(false);
     let thumb_speed = cfg.thumbwheel.speed.unwrap_or(DEFAULT_SPEED);
     let model = ctx.mouse.borrow().model;
+    let smoothing_row = slider(
+        (0.0, 90.0),
+        f64::from(smoothing),
+        &percent(smoothing),
+        ID_SMOOTHING,
+        target,
+        mtm,
+    );
+    // The glide of trackpad mode replaces smoothing.
+    set_enabled(&smoothing_row, !trackpad);
+    let style = STYLES.iter().position(|s| *s == trackpad).unwrap_or(0);
     let mut rows = vec![
+        (
+            t!("settings.scrolling.style").to_string(),
+            as_view(&popup(&style_titles(), style, ID_STYLE, target, mtm)),
+        ),
         (
             t!("settings.scrolling.direction").to_string(),
             as_view(&direction),
@@ -64,14 +101,7 @@ pub fn build(ctx: &Context, target: &AnyObject, mtm: MainThreadMarker) -> Retain
         ),
         (
             t!("settings.scrolling.smoothing").to_string(),
-            slider(
-                (0.0, 90.0),
-                f64::from(smoothing),
-                &percent(smoothing),
-                ID_SMOOTHING,
-                target,
-                mtm,
-            ),
+            smoothing_row,
         ),
     ];
     if model.has(wheel::ID) {
@@ -170,6 +200,18 @@ pub fn changed(id: &str, sender: &AnyObject, ctx: &Context, mtm: MainThreadMarke
             log::info!("settings: {id} = {v}");
             update_config(ctx, mtm, |c| set_slider(c, id, v))
         }
+        ID_STYLE => {
+            let Some(&trackpad) = popup_index(sender).and_then(|i| STYLES.get(i)) else {
+                return Vec::new();
+            };
+            log::info!("settings: {id} = trackpad {trackpad}");
+            let mut effects = update_config(ctx, mtm, |c| c.scroll.trackpad = Some(trackpad));
+            // Rebuild the tab: smoothing is greyed out in trackpad mode.
+            if !effects.is_empty() {
+                effects.push(Effect::Refresh);
+            }
+            effects
+        }
         ID_THUMB_MODE => {
             let Some(mode) = popup_index(sender).and_then(|i| ThumbMode::ALL.get(i)) else {
                 return Vec::new();
@@ -266,6 +308,32 @@ mod tests {
                 assert_ne!(text, key, "{lang}: {key}");
             }
         }
+    }
+
+    #[test]
+    fn styles_have_titles_and_survive_other_changes() {
+        for lang in crate::i18n::available() {
+            for key in [
+                "settings.scrolling.style_standard",
+                "settings.scrolling.style_trackpad",
+            ] {
+                let text = t!(key, locale = lang.as_str()).to_string();
+                assert_ne!(text, key, "{lang}: {key}");
+            }
+        }
+        assert_eq!(style_titles().len(), STYLES.len());
+        let path = temp_config("style", crate::config::EXAMPLE);
+        assert_eq!(
+            Config::read_existing(&path).unwrap().scroll.trackpad,
+            Some(false)
+        );
+        Config::update_file(&path, |c| c.scroll.trackpad = Some(true)).unwrap();
+        Config::update_file(&path, |c| set_slider(c, ID_SPEED, 200.0)).unwrap();
+        let c = Config::read_existing(&path).unwrap();
+        assert_eq!((c.scroll.trackpad, c.scroll.speed), (Some(true), Some(200)));
+        // A file without the key (older versions) is standard scrolling.
+        let old = temp_config("style-old", "[scroll]\nspeed = 140\n");
+        assert_eq!(Config::read_existing(&old).unwrap().scroll.trackpad, None);
     }
 
     #[test]

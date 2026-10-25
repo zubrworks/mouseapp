@@ -41,8 +41,11 @@ speed = 100
 direction = "standard"
 # Wheel speed in percent (100 = default, 10-1000).
 speed = 100
-# Smoothing in percent (0 = off, up to 90).
+# Smoothing in percent (0 = off, up to 90). Not used with trackpad = true.
 smoothing = 0
+# Experimental: scroll with the wheel like on a trackpad (smooth movement
+# that glides on after a fast spin). false = standard wheel scrolling.
+trackpad = false
 
 # Button -> action. Buttons: back, forward, middle, smartshift.
 # Action names are defined by the actions module (e.g. mission_control,
@@ -57,6 +60,12 @@ forward = "forward"
 # directions. Left and right both set: one action per threshold of movement
 # while the button is held.
 [gestures]
+# Experimental, for all gesture buttons: switch desktops like a trackpad
+# swipe. With left / right set to desktop_left / desktop_right the desktop
+# follows the mouse while the button is held; on release it moves on or
+# comes back (by distance and speed). mission_control / app_expose on up /
+# down open through the Dock. false = the actions with their keys.
+trackpad_swipe = false
 # Minimal movement (in raw units) that counts as a gesture, 1-10000.
 threshold = 50
 click = "mission_control"

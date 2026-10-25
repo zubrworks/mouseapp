@@ -55,6 +55,11 @@ impl Config {
             if bundle.trim().is_empty() {
                 return Err("empty bundle id in [apps]".into());
             }
+            if app.gestures.trackpad_swipe.is_some() {
+                return Err(format!(
+                    "apps.\"{bundle}\".gestures.trackpad_swipe: set it in [gestures] only (it is global)"
+                ));
+            }
             validate_actions(&format!("apps.\"{bundle}\"."), &app.buttons, &app.gestures)?;
         }
         Ok(())

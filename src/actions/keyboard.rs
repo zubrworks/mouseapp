@@ -156,6 +156,18 @@ fn system_modifiers() -> u64 {
     unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) & FLAGS_MODIFIERS }
 }
 
+/// True if `flags` hold Cmd, Ctrl or Opt: keys that give the mouse wheel
+/// another meaning (zoom, ...). Shift is left out on purpose.
+fn has_wheel_modifier(flags: u64) -> bool {
+    flags & (FLAG_CMD | FLAG_CTRL | FLAG_ALT) != 0
+}
+
+/// True while Cmd, Ctrl or Opt is physically down (the scroll glide stops
+/// then, so the app does not turn it into zoom).
+pub fn wheel_modifier_held() -> bool {
+    has_wheel_modifier(system_modifiers())
+}
+
 /// Modifiers held on purpose right now: the user's on a real keyboard plus
 /// the Cmd of the app switcher.
 fn held_modifiers() -> u64 {
@@ -487,9 +499,14 @@ unsafe extern "C" {
 
 /// Toggles Show Desktop through the Dock notification (F11 with Fn does not work reliably).
 pub fn show_desktop() -> Result<()> {
+    dock_notification("com.apple.showdesktop.awake")
+}
+
+/// Sends a notification to the Dock, e.g. `com.apple.expose.awake` (Mission Control).
+pub fn dock_notification(name: &str) -> Result<()> {
     use core_foundation::base::TCFType;
     use core_foundation::string::CFString;
-    let name = CFString::new("com.apple.showdesktop.awake");
+    let name = CFString::new(name);
     // SAFETY: `name` is a valid CFString that outlives the call; the second argument is unused.
     let rc = unsafe { CoreDockSendNotification(name.as_concrete_TypeRef().cast(), std::ptr::null()) };
     if rc != 0 {
@@ -501,6 +518,16 @@ pub fn show_desktop() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wheel_modifiers_are_cmd_ctrl_opt() {
+        assert!(has_wheel_modifier(FLAG_CMD));
+        assert!(has_wheel_modifier(FLAG_CTRL));
+        assert!(has_wheel_modifier(FLAG_ALT));
+        assert!(has_wheel_modifier(FLAG_SHIFT | FLAG_CMD));
+        assert!(!has_wheel_modifier(FLAG_SHIFT));
+        assert!(!has_wheel_modifier(0));
+    }
 
     #[test]
     fn media_event_data_layout() {

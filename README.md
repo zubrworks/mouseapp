@@ -11,6 +11,7 @@ useful.
 - DPI and SmartShift threshold
 - Button and gesture remapping (shortcuts, Mission Control, desktops, media keys)
 - Thumb wheel modes, scroll direction, speed and smoothing
+- Experimental: wheel scrolling and desktop switching like a trackpad
 - Profiles with per-app overrides
 - Menu bar app with a settings window, plus a command-line interface
 - Device info: firmware, serial number, battery, Easy-Switch channels with computer names

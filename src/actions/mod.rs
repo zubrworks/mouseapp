@@ -9,6 +9,7 @@
 //! `gestures` (buttons only: the button works like the gesture button, see
 //! [`BUTTON_ONLY`]) and `shortcut:<combo>` (e.g. `shortcut:cmd+shift+a`). Hyphens are accepted instead of underscores.
 
+pub mod dock_swipe;
 pub mod keyboard;
 pub mod pointer;
 
@@ -35,6 +36,41 @@ pub enum Action {
     /// The button tracks movement like the gesture button and runs the
     /// `[gestures]` actions (handled by the event loop, buttons only).
     Gestures,
+    /// Mission Control or App Exposé through a Dock notification, without
+    /// keys: what up and down run with `gestures.trackpad_swipe` (no name in
+    /// the config, see [`through_dock`]).
+    Expose(Expose),
+}
+
+/// What [`Action::Expose`] opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expose {
+    MissionControl,
+    App,
+}
+
+impl Expose {
+    fn notification(self) -> &'static str {
+        match self {
+            Expose::MissionControl => "com.apple.expose.awake",
+            Expose::App => "com.apple.expose.front.awake",
+        }
+    }
+}
+
+/// Mission Control and App Exposé (the built-in names, or a shortcut with
+/// the same keys) as their Dock notification; `None` for any other action.
+pub fn through_dock(action: &Action) -> Option<Action> {
+    static KEYS: OnceLock<Option<(Action, Action)>> = OnceLock::new();
+    let keys = KEYS.get_or_init(|| Some((parse("mission_control").ok()?, parse("app_expose").ok()?)));
+    let (mission_control, app_expose) = keys.as_ref()?;
+    if action == mission_control {
+        Some(Action::Expose(Expose::MissionControl))
+    } else if action == app_expose {
+        Some(Action::Expose(Expose::App))
+    } else {
+        None
+    }
 }
 
 /// Names of all built-in actions (without `shortcut:<combo>`).
@@ -123,13 +159,18 @@ fn accessibility_ok(known: &AtomicBool, check: impl FnOnce() -> bool) -> bool {
     granted
 }
 
+/// True if Accessibility is granted (remembered once it is).
+pub(crate) fn accessibility() -> bool {
+    accessibility_ok(&ACCESSIBILITY_OK, crate::permissions::accessibility_granted)
+}
+
 /// True for Show Desktop and App Exposé, which put the Dock in a mode that
 /// draws nothing on a full-screen Space (the next one only closes it). Compared
 /// with what the built-in name resolves to, so a custom shortcut with the same
 /// keys counts too.
 fn needs_regular_space(action: &Action) -> bool {
     static APP_EXPOSE: OnceLock<Option<Action>> = OnceLock::new();
-    *action == Action::ShowDesktop
+    matches!(action, Action::ShowDesktop | Action::Expose(Expose::App))
         || APP_EXPOSE.get_or_init(|| parse("app_expose").ok()).as_ref() == Some(action)
 }
 
@@ -154,7 +195,7 @@ pub fn run(action: &Action, dev: Option<&Device>) -> Result<()> {
         Action::Gestures => bail!("{}", t!("action.button_only", name = "gestures")),
         _ => {}
     }
-    if !accessibility_ok(&ACCESSIBILITY_OK, crate::permissions::accessibility_granted) {
+    if !accessibility() {
         bail!("{}", t!("action.no_accessibility"));
     }
     if skipped_in_fullscreen(action, crate::spaces::cursor_space_is_fullscreen) {
@@ -166,6 +207,7 @@ pub fn run(action: &Action, dev: Option<&Device>) -> Result<()> {
         Action::Media(m) => keyboard::media(*m),
         Action::ShowDesktop => keyboard::show_desktop(),
         Action::MiddleClick => pointer::middle_click(),
+        Action::Expose(e) => keyboard::dock_notification(e.notification()),
         Action::ShiftWheelMode | Action::Gestures => Ok(()),
     }
 }
@@ -225,6 +267,26 @@ mod tests {
             assert!(!skipped_in_fullscreen(&a, || Some(false)), "{name}");
             // Type not readable: sent as before.
             assert!(!skipped_in_fullscreen(&a, || None), "{name}");
+        }
+    }
+
+    #[test]
+    fn expose_through_the_dock_keeps_the_fullscreen_check() {
+        let app = Action::Expose(Expose::App);
+        assert!(skipped_in_fullscreen(&app, || Some(true)));
+        assert!(!skipped_in_fullscreen(&app, || Some(false)));
+        let mc = Action::Expose(Expose::MissionControl);
+        assert!(!skipped_in_fullscreen(&mc, || panic!("asked")));
+    }
+
+    #[test]
+    fn mission_control_and_app_expose_go_through_the_dock() {
+        let dock = |n: &str| through_dock(&parse(n).unwrap());
+        assert_eq!(dock("mission_control"), Some(Action::Expose(Expose::MissionControl)));
+        assert_eq!(dock("shortcut:ctrl+up"), Some(Action::Expose(Expose::MissionControl)));
+        assert_eq!(dock("app_expose"), Some(Action::Expose(Expose::App)));
+        for other in ["show_desktop", "desktop_left", "copy", "shortcut:ctrl+shift+up"] {
+            assert_eq!(dock(other), None, "{other}");
         }
     }
 

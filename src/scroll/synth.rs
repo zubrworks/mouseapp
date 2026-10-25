@@ -1,4 +1,5 @@
-//! Synthesized thumb wheel scrolling: phased horizontal pixel events.
+//! Synthesized scrolling: phased horizontal pixel events for the thumb
+//! wheel, and plain pixel events for the main wheel in trackpad mode.
 
 use std::time::{Duration, Instant};
 
@@ -26,14 +27,21 @@ impl Phase {
     }
 }
 
+/// Builds a pixel scroll event: `vertical` like the wheel's delta,
+/// `horizontal` positive when content moves right. It is continuous
+/// (precise deltas) and carries no phase.
+fn pixel_event(vertical: i32, horizontal: i32) -> Result<impl std::ops::Deref<Target = CGEvent>> {
+    CGEvent::new_scroll_wheel_event2(None, CGScrollEventUnit::Pixel, 2, vertical, horizontal, 0)
+        .ok_or_else(|| anyhow!("cannot create scroll event"))
+}
+
 /// Builds a horizontal pixel scroll event (positive = content moves right)
 /// carrying a scroll phase, like a trackpad swipe.
 pub(super) fn horizontal_event(
     pixels: i32,
     phase: Phase,
 ) -> Result<impl std::ops::Deref<Target = CGEvent>> {
-    let ev = CGEvent::new_scroll_wheel_event2(None, CGScrollEventUnit::Pixel, 2, 0, pixels, 0)
-        .ok_or_else(|| anyhow!("cannot create scroll event"))?;
+    let ev = pixel_event(0, pixels)?;
     // Only the phase is set after creation: writing a delta field would make
     // macOS recompute the others.
     CGEvent::set_integer_value_field(
@@ -42,6 +50,16 @@ pub(super) fn horizontal_event(
         phase.value(),
     );
     Ok(ev)
+}
+
+/// Posts a vertical pixel event without phase (main wheel in trackpad
+/// mode): apps scroll by the pixels but never stretch the page past its
+/// edge or start a pull gesture (see `trackpad`).
+pub(super) fn post_vertical(pixels: i32) -> Result<()> {
+    let ev = pixel_event(pixels, 0)?;
+    CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&ev));
+    log::debug!("wheel: posted {pixels} px");
+    Ok(())
 }
 
 fn post_horizontal(pixels: i32, phase: Phase) -> Result<()> {
@@ -161,5 +179,17 @@ mod tests {
         let ev = horizontal_event(3, Phase::Changed).unwrap();
         assert_eq!(get(&ev, CGEventField::ScrollWheelEventScrollPhase), 2);
         assert_eq!(get(&ev, CGEventField::ScrollWheelEventPointDeltaAxis2), 3);
+    }
+
+    #[test]
+    fn vertical_event_is_plain_continuous_pixels() {
+        let get = |ev: &CGEvent, f| CGEvent::integer_value_field(Some(ev), f);
+        let ev = pixel_event(-12, 0).unwrap();
+        assert_eq!(get(&ev, CGEventField::ScrollWheelEventIsContinuous), 1);
+        assert_eq!(get(&ev, CGEventField::ScrollWheelEventPointDeltaAxis1), -12);
+        assert_eq!(get(&ev, CGEventField::ScrollWheelEventPointDeltaAxis2), 0);
+        // No gesture and no momentum: no rubber band, no pull to reload.
+        assert_eq!(get(&ev, CGEventField::ScrollWheelEventScrollPhase), 0);
+        assert_eq!(get(&ev, CGEventField::ScrollWheelEventMomentumPhase), 0);
     }
 }

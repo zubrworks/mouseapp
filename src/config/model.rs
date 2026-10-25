@@ -88,8 +88,11 @@ pub struct Scroll {
     pub direction: Option<String>,
     /// Wheel speed in percent, 10-1000 (default 100).
     pub speed: Option<u16>,
-    /// Smoothing in percent, 0-90 (default 0 = off).
+    /// Smoothing in percent, 0-90 (default 0 = off; not used in trackpad mode).
     pub smoothing: Option<u8>,
+    /// Trackpad-like wheel scrolling (experimental): smooth pixel scrolling
+    /// with momentum. Missing = off (standard wheel scrolling).
+    pub trackpad: Option<bool>,
 }
 
 /// Actions of one gesture button: a click without movement or a move in one
@@ -168,6 +171,10 @@ impl GestureSet {
 /// `[gestures.<button>]` section for every other button set to `gestures`.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Gestures {
+    /// Desktops switched like with a trackpad swipe (experimental, all
+    /// gesture buttons; global only, not in `[apps]`). Missing = off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trackpad_swipe: Option<bool>,
     /// The thumb gesture button (keys directly in `[gestures]`). Must stay
     /// before `buttons`: it takes its keys first, the rest are sections.
     #[serde(flatten)]

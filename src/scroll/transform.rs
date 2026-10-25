@@ -1,5 +1,6 @@
-//! Scroll value transforms: thumb wheel rotation to pixels, and direction,
-//! speed and smoothing of mouse wheel events.
+//! Scroll value transforms: thumb wheel rotation to pixels, direction, speed
+//! and smoothing of mouse wheel events, and wheel events to pixels in
+//! trackpad mode.
 
 #[cfg(test)]
 use std::time::Duration;
@@ -57,6 +58,8 @@ pub(super) struct Settings {
     factor: f64,
     /// 0.0 = off .. 0.9: share of the previous delta mixed into the next.
     smoothing: f64,
+    /// The main wheel scrolls like a trackpad (see `trackpad`).
+    trackpad: bool,
 }
 
 impl Settings {
@@ -69,17 +72,49 @@ impl Settings {
             _ => false,
         };
         let speed = c.speed.unwrap_or(DEFAULT_SPEED);
-        let smoothing = c.smoothing.unwrap_or(0);
-        if !invert && speed == DEFAULT_SPEED && smoothing == 0 {
+        let trackpad = c.trackpad.unwrap_or(false);
+        // The glide of trackpad mode replaces smoothing.
+        let smoothing = if trackpad {
+            0
+        } else {
+            c.smoothing.unwrap_or(0)
+        };
+        if !invert && speed == DEFAULT_SPEED && smoothing == 0 && !trackpad {
             return None;
         }
         Some(Settings {
             invert,
             factor: f64::from(speed) / 100.0,
             smoothing: f64::from(smoothing) / 100.0,
+            trackpad,
         })
     }
+
+    pub(super) fn trackpad(&self) -> bool {
+        self.trackpad
+    }
+
+    /// Pixels of a vertical wheel movement in trackpad mode, with speed and
+    /// direction applied. The fixed-point delta (fractional lines, with the
+    /// macOS scroll acceleration) leads; without it the line delta, and the
+    /// pixel delta last.
+    pub(super) fn trackpad_pixels(&self, d: Deltas) -> f64 {
+        let lines = if d.fixed != 0.0 {
+            d.fixed
+        } else if d.lines != 0 {
+            d.lines as f64
+        } else {
+            d.points as f64 / SYSTEM_LINE_PIXELS
+        };
+        let sign = if self.invert { -1.0 } else { 1.0 };
+        lines * TRACKPAD_LINE_PIXELS * self.factor * sign
+    }
 }
+
+/// Pixels per line in the pixel delta macOS gives a wheel event.
+const SYSTEM_LINE_PIXELS: f64 = 10.0;
+/// Pixels per wheel line (one slow click) in trackpad mode at 100% speed.
+const TRACKPAD_LINE_PIXELS: f64 = 24.0;
 
 /// One axis of a scroll event: line, pixel and fixed-point (fractional) deltas.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -200,6 +235,64 @@ pub(super) fn transform(
     }
 }
 
+/// A vertical mouse wheel event in trackpad mode.
+#[derive(Debug, PartialEq)]
+pub(super) struct TrackpadInput {
+    /// Scaled and signed pixels.
+    pub pixels: f64,
+    /// Cmd, Ctrl or Opt is down: the wheel means zoom or the like.
+    pub wheel_modifier: bool,
+    /// Shift is down: the wheel scrolls sideways.
+    pub shift: bool,
+}
+
+impl TrackpadInput {
+    /// No modifier key: the event belongs to the glide.
+    pub fn plain(&self) -> bool {
+        !self.wheel_modifier && !self.shift
+    }
+}
+
+/// In trackpad mode: a vertical mouse wheel event. `None` leaves the event
+/// to [`transform`]: trackpads and synthesized events (continuous) and
+/// horizontal wheels. What to do with modifier keys is up to the caller.
+pub(super) fn trackpad_input(
+    ev: &core_graphics::event::CGEvent,
+    s: &Settings,
+) -> Option<TrackpadInput> {
+    use core_graphics::event::{CGEventFlags as Fl, EventField as F};
+
+    if !s.trackpad || ev.get_integer_value_field(F::SCROLL_WHEEL_EVENT_IS_CONTINUOUS) != 0 {
+        return None;
+    }
+    let horizontal = ev.get_integer_value_field(F::SCROLL_WHEEL_EVENT_DELTA_AXIS_2) != 0
+        || ev.get_integer_value_field(F::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2) != 0
+        || ev.get_double_value_field(F::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2) != 0.0;
+    if horizontal {
+        return None;
+    }
+    let flags = ev.get_flags();
+    let wheel_modifier = flags.intersects(
+        Fl::CGEventFlagCommand | Fl::CGEventFlagAlternate | Fl::CGEventFlagControl,
+    );
+    let shift = flags.intersects(Fl::CGEventFlagShift);
+    let d = Deltas {
+        lines: ev.get_integer_value_field(F::SCROLL_WHEEL_EVENT_DELTA_AXIS_1),
+        points: ev.get_integer_value_field(F::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1),
+        fixed: ev.get_double_value_field(F::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1),
+    };
+    if d == Deltas::default() {
+        return None;
+    }
+    let px = s.trackpad_pixels(d);
+    log::debug!("scroll: {d:?} -> trackpad {px:.1} px");
+    Some(TrackpadInput {
+        pixels: px,
+        wheel_modifier,
+        shift,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,7 +340,99 @@ mod tests {
             direction: direction.map(String::from),
             speed,
             smoothing,
+            trackpad: None,
         }
+    }
+
+    fn trackpad_cfg(direction: Option<&str>, speed: Option<u16>) -> Settings {
+        let c = Scroll {
+            trackpad: Some(true),
+            smoothing: Some(50),
+            ..cfg(direction, speed, None)
+        };
+        Settings::from_config(&c, true).unwrap()
+    }
+
+    #[test]
+    fn trackpad_mode_needs_the_tap_and_drops_smoothing() {
+        let s = trackpad_cfg(None, None);
+        assert!(s.trackpad());
+        assert_eq!(s.smoothing, 0.0);
+        assert!(!s.invert);
+        let off = Scroll {
+            trackpad: Some(false),
+            ..cfg(None, None, None)
+        };
+        assert!(Settings::from_config(&off, true).is_none());
+        let s = Settings::from_config(&cfg(None, None, Some(40)), true).unwrap();
+        assert!(!s.trackpad());
+        assert!((s.smoothing - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn wheel_clicks_become_pixels() {
+        let d = |lines, points, fixed| Deltas {
+            lines,
+            points,
+            fixed,
+        };
+        let s = trackpad_cfg(None, None);
+        // One click: one line.
+        assert_eq!(s.trackpad_pixels(d(1, 10, 1.0)), 24.0);
+        // Accelerated by macOS: the fractional delta leads.
+        assert_eq!(s.trackpad_pixels(d(2, 25, 2.5)), 60.0);
+        // High-resolution wheel: fractions of a line.
+        assert_eq!(s.trackpad_pixels(d(0, 1, 0.125)), 3.0);
+        assert_eq!(s.trackpad_pixels(d(-3, 0, 0.0)), -72.0);
+        assert_eq!(s.trackpad_pixels(d(0, 5, 0.0)), 12.0);
+        // Speed and direction apply.
+        assert_eq!(
+            trackpad_cfg(None, Some(200)).trackpad_pixels(d(1, 10, 1.0)),
+            48.0
+        );
+        assert_eq!(
+            trackpad_cfg(Some("standard"), None).trackpad_pixels(d(1, 10, 1.0)),
+            -24.0
+        );
+        assert_eq!(
+            trackpad_cfg(Some("natural"), None).trackpad_pixels(d(-1, -10, -1.0)),
+            -24.0
+        );
+    }
+
+    #[test]
+    fn trackpad_takes_only_vertical_wheel_events() {
+        use core_graphics::event::EventField as F;
+        let s = trackpad_cfg(None, None);
+        let px = |ev: &core_graphics::event::CGEvent| trackpad_input(ev, &s).map(|i| i.pixels);
+        assert_eq!(px(&wheel_event(1)), Some(24.0));
+        assert!(trackpad_input(&wheel_event(1), &s).unwrap().plain());
+        let off = event_settings(300);
+        assert_eq!(trackpad_input(&wheel_event(1), &off), None);
+        let ev = wheel_event(1);
+        ev.set_integer_value_field(F::SCROLL_WHEEL_EVENT_IS_CONTINUOUS, 1);
+        assert_eq!(px(&ev), None);
+        let ev = wheel_event(0);
+        assert_eq!(px(&ev), None);
+        let ev = wheel_event(1);
+        ev.set_integer_value_field(F::SCROLL_WHEEL_EVENT_DELTA_AXIS_2, 1);
+        assert_eq!(px(&ev), None);
+    }
+
+    #[test]
+    fn trackpad_input_reports_modifiers() {
+        use core_graphics::event::CGEventFlags as Fl;
+        let s = trackpad_cfg(None, None);
+        for flag in [Fl::CGEventFlagCommand, Fl::CGEventFlagControl, Fl::CGEventFlagAlternate] {
+            let ev = wheel_event(1);
+            ev.set_flags(flag);
+            let i = trackpad_input(&ev, &s).unwrap();
+            assert!(i.wheel_modifier && !i.shift && !i.plain());
+        }
+        let ev = wheel_event(1);
+        ev.set_flags(Fl::CGEventFlagShift);
+        let i = trackpad_input(&ev, &s).unwrap();
+        assert!(!i.wheel_modifier && i.shift && !i.plain());
     }
 
     #[test]

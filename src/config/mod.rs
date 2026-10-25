@@ -63,6 +63,9 @@ mod tests {
             "[scroll]\ndirection = \"up\"",
             "[scroll]\nspeed = 5",
             "[scroll]\nsmoothing = 95",
+            "[scroll]\ntrackpad = \"yes\"",
+            "[gestures]\ntrackpad_swipe = \"yes\"",
+            "[apps.\"x\".gestures]\ntrackpad_swipe = true",
             "unknown_key = 1",
             // The language lives in config.toml, not in a profile.
             "language = \"en\"",
@@ -143,6 +146,24 @@ mod tests {
         .unwrap();
         assert!(!out.contains("[gestures.middle]"), "{out}");
         assert!(Config::parse(&out, p).unwrap().gestures.buttons.is_empty());
+    }
+
+    #[test]
+    fn trackpad_swipe_is_a_gestures_key_and_off_when_missing() {
+        let c = Config::parse("[gestures]\ntrackpad_swipe = true\nup = \"mute\"\n[gestures.middle]\nup = \"copy\"\n", &p()).unwrap();
+        assert_eq!(c.gestures.trackpad_swipe, Some(true));
+        assert_eq!(c.gestures.thumb.up.as_deref(), Some("mute"));
+        assert_eq!(c.gestures.buttons.keys().collect::<Vec<_>>(), ["middle"]);
+        // Older files without the key.
+        let old = Config::parse("[gestures]\nup = \"mute\"\n", &p()).unwrap();
+        assert_eq!(old.gestures.trackpad_swipe, None);
+        let out = edit_text("[gestures]\nup = \"mute\"\n", Path::new("t.toml"), |c| {
+            c.gestures.trackpad_swipe = Some(true);
+        })
+        .unwrap();
+        let back = Config::parse(&out, &p()).unwrap();
+        assert_eq!(back.gestures.trackpad_swipe, Some(true));
+        assert!(back.gestures.buttons.is_empty(), "{out}");
     }
 
     #[test]
